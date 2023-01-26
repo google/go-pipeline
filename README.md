@@ -29,7 +29,7 @@ This package may be useful when concurrency is required but no simple data
 decomposition is apparent.  For example, when processing a large number of
 inputs, each of which will affect a significant proportion of a large shared
 structure, many conventional techniques might introduce so much synchronization
-overhead that any benefit from additional concurrency is lost.  
+overhead that any benefit from additional concurrency is lost.
 
 ## How does it work?
 
@@ -46,6 +46,13 @@ decides when no more work items should enter the pipeline.  The rest of the
 pipeline is a series of *stages*, each of which draws from its predecessor,
 with the initial stage drawing from the producer.  Each produced work item will
 visit each stage in turn, before being retired out of the tail of the pipeline.
+The entire pipeline is invoked with an executor such as `Do()`.
+
+Producers and stages may return errors.  An erroring producer or stage ceases
+to produce work items for downstream use, and discards all work items it
+receives; in this way, as soon as an error occurs anywhere in the pipeline,
+the rest of the pipeline drains and the executor returns the first captured
+error.
 
 Work items may be large and complex, and expensive to allocate and set up.  To
 avoid this expense, producers may *recycle* work items that have been retired
