@@ -83,3 +83,136 @@ tools for tuning its pipelines:
     can safely be done on multiple work items concurrently, then setting E's
     concurrency to 5 would increase utilization of stages A-D to 100% and yield
     an effective concurrency of 9.
+
+## Tell me more
+
+A demonstration of how the pipeline works is included at ./demo/demo.go.  This
+program builds a prefix tree from a provided dictionary of (utf8) words.  This
+task is difficult to parallelize, since adding each word requires updating the
+entire path from the prefix tree root down to the word's node.  We could use
+a lock at each node, but this would only hurt: not only would it significantly
+harm the space and time requirements of working with the tree, but lock
+contention would increase in the higher levels of the tree, to the point that
+the root node's lock would be overwhelmed (every word starts with '').
+
+Instead, we can build a pipeline.  In this pipeline, the *work item* will be
+a batch of words from the dictionary, bundled with a local prefix tree.  We'll
+use three pipeline stages:
+
+*   A producer that divides up the word list into batches, then prepares the
+    work items and sends them downstream;
+*   A 'local insert' stage that fills the prefix tree within the work item from
+    the work item's word batch;
+*   A 'global merge' stage that merges the work item's prefix tree into the
+    global prefix tree.
+    
+These local prefix trees can be large and complex, and creating a new one for
+each batch might introduce too much allocation and GC overhead.  So, this
+application is a good candidate for a recycling producer; this means we also
+need to provide a way to clear out a work item's local prefix tree.  Here's how
+this recycling producer function might look:
+
+```go
+producerFn := func(get func() (*batch, bool), put func(*batch)) error {
+    for i := 0; i < len(words); i += *batchSize {
+        b, ok := get()
+        if ok {
+   			b.root.Clear()
+   		} else {
+   			b = &batch{
+   				root: prefixtree.New(),
+   			}
+   		}
+   		end := i + *batchSize
+   		if end > len(words) {
+   			end = len(words)
+   		}
+   		b.words = words[i:end]
+   		put(b)
+   	}
+   	return nil
+}
+```
+
+The stage functions are straightforward::
+
+```go
+localInsertFn := func(in *batch) (out *batch, err error) {
+   	for _, word := range in.words {
+   	   	in.root.Insert(word)
+   	}
+   	return in, nil
+}
+globalMergeFn := func(in *batch) (out *batch, err error) {
+   	root.MergeFrom(in.root)
+   	return in, nil
+}
+```
+
+We can then turn these functions into pipeline stages, and attach options:
+
+```go
+producer := pipeline.NewRecyclingProducer(
+    producerFn,
+    pipeline.Name("batch production"),
+	pipeline.InputBufferSize(1),
+)
+localInsertStage := pipeline.NewStage(
+	localInsertFn,
+    pipeline.Name("local insert"),
+	pipeline.Concurrency(2),
+	pipeline.InputBufferSize(1),
+)
+globalMergeStage := pipeline.NewStage(
+	globalMergeFn,
+    pipeline.Name("global merge"),
+	pipeline.InputBufferSize(1),
+)
+```
+
+And then invoke the pipeline using an *executor function*, `pipeline.Do()` or
+`pipeline.Measure()`:
+
+```go
+if err := pipeline.Do(
+    producer,
+	localInsertStage,
+	globalMergeStage,
+); err != nil {
+    log.Fatalf("Do() failed: %s", err)
+}
+```
+
+Note that declaring the producer and stage functions, defining the producer and
+stages, and invoking the executor could be all done in one go; they're
+separated them here for reusability and clarity.
+
+`demo.go` provides three invocation modes: `serial`, which does no
+parallelization at all; `concurrenct`, which uses `pipeline.Do()`, and
+`measure`, which uses `pipeline.Measure()`.  The latter prints out pipeline
+statistics after execution, e.g.
+
+```
+go run . --dict_filename words.txt --mode measure
+2023/02/08 12:20:18 Pipeline wall time: 768.044933ms
+  batch production (0): 94 items, total 768.01492ms (8.170371ms/item), work 209.897747ms (2.232954ms/item)
+  local insert (0)    : 47 items, total 760.165039ms (16.173724ms/item), work 468.84056ms (9.975331ms/item)
+  local insert (1)    : 47 items, total 753.511622ms (16.032162ms/item), work 461.03055ms (9.80916ms/item)
+  global merge (0)    : 94 items, total 768.014162ms (8.170363ms/item), work 750.937744ms (7.988699ms/item)
+2023/02/08 12:20:18 Prefix tree construction took 768.194396ms.  Added 466551 words.
+```
+
+The main value to look for here is the largest `work` duration in any single
+pipeline; this (together with available concurrency e.g. via `GOMAXPROCS`)
+is the main factor limiting overall pipeline execution time: the tree took
+769ms to construct, of which 751ms was due to the `global merge` stage.  Note
+that there are two instances of the `local insert` stage; this is because we
+specified
+`pipeline.Concurrency(2)` for that stage.
+
+To reiterate a point from earlier: pipeline parallelization is not trivial!
+The `concurrent` mode of `demo` will only outperform the `serial` mode for very
+large input dictionaries, and to get `concurrent` to significantly outperform
+`serial` we'd need to figure out some way to split the `global merge` stage:
+perhaps by partitioning the global tree's nodes into groups, with one pipeline
+stage configured to update each group.
