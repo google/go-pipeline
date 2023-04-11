@@ -312,10 +312,12 @@ func (sm *StageMetrics) detailRow(labelCols int) string {
 			sm.WorkDuration, sm.WorkDuration/time.Duration(sm.Items),
 		)
 	} else {
-		formatStr := fmt.Sprintf("%%-%ds: %%d items, total %%s", labelCols)
+		formatStr := fmt.Sprintf("%%-%ds: %%d items, total %%s, work %%s", labelCols)
 		return fmt.Sprintf(formatStr,
 			sm.label(),
 			sm.Items,
+			sm.StageDuration,
+			sm.WorkDuration,
 		)
 	}
 }
