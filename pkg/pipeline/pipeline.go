@@ -303,13 +303,21 @@ func (sm *StageMetrics) label() string {
 }
 
 func (sm *StageMetrics) detailRow(labelCols int) string {
-	formatStr := fmt.Sprintf("%%-%ds: %%d items, total %%s (%%s/item), work %%s (%%s/item)", labelCols)
-	return fmt.Sprintf(formatStr,
-		sm.label(),
-		sm.Items,
-		sm.StageDuration, sm.StageDuration/time.Duration(sm.Items),
-		sm.WorkDuration, sm.WorkDuration/time.Duration(sm.Items),
-	)
+	if sm.Items > 0 {
+		formatStr := fmt.Sprintf("%%-%ds: %%d items, total %%s (%%s/item), work %%s (%%s/item)", labelCols)
+		return fmt.Sprintf(formatStr,
+			sm.label(),
+			sm.Items,
+			sm.StageDuration, sm.StageDuration/time.Duration(sm.Items),
+			sm.WorkDuration, sm.WorkDuration/time.Duration(sm.Items),
+		)
+	} else {
+		formatStr := fmt.Sprintf("%%-%ds: %%d items, total %%s", labelCols)
+		return fmt.Sprintf(formatStr,
+			sm.label(),
+			sm.Items,
+		)
+	}
 }
 
 // Metrics defines a set of performance metrics collected for an
